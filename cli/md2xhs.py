@@ -14,6 +14,7 @@ md2xhs.py — 纯命令行：把一个 Markdown 文件渲染成适合小红书�
 """
 
 import argparse
+import datetime
 import os
 import re
 import sys
@@ -34,6 +35,7 @@ EMOJI_STRIKE = 96  # Apple Color Emoji 在 Pillow 中可用的位图字号
 # 主题（背景渐变 + 强调色）
 # ----------------------------------------------------------------------------
 THEMES = {
+    "mono":    {"from": (245, 245, 247), "to": (228, 228, 232), "accent": (28, 28, 30)},
     "indigo":  {"from": (102, 126, 234), "to": (118, 75, 162),  "accent": (99, 102, 241)},
     "sunset":  {"from": (255, 154, 158), "to": (250, 208, 196), "accent": (236, 100, 75)},
     "ocean":   {"from": (33, 147, 176),  "to": (109, 213, 237), "accent": (14, 116, 144)},
@@ -317,17 +319,55 @@ class Atom:
         self.img = img
 
 
+_glyph_cache = {}
+_notdef_cache = {}
+_MISSING_REF = "\U000FFFFD"  # 私用区码点，几乎所有字体都没有 → 用作 .notdef 参考形状
+
+
+def font_has_glyph(font, ch):
+    """检测 font 是否真的有 ch 的字形（通过与 .notdef 形状比对）。无 fontTools 依赖。"""
+    key = (id(font), ch)
+    cached = _glyph_cache.get(key)
+    if cached is not None:
+        return cached
+    res = True
+    try:
+        m = font.getmask(ch)
+        if m.size[0] == 0 or m.size[1] == 0:
+            res = True  # 零宽（组合符等）当作有
+        else:
+            ref = _notdef_cache.get(id(font))
+            if ref is None:
+                ref = font.getmask(_MISSING_REF)
+                _notdef_cache[id(font)] = bytes(ref) if ref.size[0] else b""
+                ref = _notdef_cache[id(font)]
+            if m.size == font.getmask(_MISSING_REF).size and bytes(m) == ref:
+                res = False
+    except Exception:
+        res = True
+    _glyph_cache[key] = res
+    return res
+
+
 def pick_font(fb: FontBook, style: str, ch: str, size: int, serif: bool):
-    if is_ipa(ch):
-        return fb.get("ipa", size)
+    # 选主字体
     if style == "code":
-        # 代码字体不含中文，遇中文用 cjk
-        if is_cjk(ch):
-            return fb.get("cjk", size)
-        return fb.get("mono", size)
-    if serif:
-        return fb.get("serif_bold" if style == "bold" else "serif", size)
-    return fb.get("cjk_bold" if style == "bold" else "cjk", size)
+        base = "cjk" if is_cjk(ch) else "mono"
+    elif serif:
+        base = "serif_bold" if style == "bold" else "serif"
+    else:
+        base = "cjk_bold" if style == "bold" else "cjk"
+    f = fb.get(base, size)
+    # 中文/空格主字体必有，直接返回
+    if is_cjk(ch) or ch == " ":
+        return f
+    # 其它字符（拉丁/IPA/符号）：主字体缺字形则回退到 Arial Unicode
+    if font_has_glyph(f, ch):
+        return f
+    alt = fb.get("ipa", size)
+    if font_has_glyph(alt, ch):
+        return alt
+    return f
 
 
 def atomize(runs, fb, size, serif=False):
@@ -362,16 +402,19 @@ def atomize(runs, fb, size, serif=False):
                 atoms.append(Atom(ch, "cjk", style, f, f.getlength(ch)))
                 j += 1
                 continue
-            # 普通词：累积到下一个空格/中文/emoji；并在 IPA 边界切分（保证音标走 Arial Unicode 回退）
+            # 普通词：按“所选字体相同”累积，遇字体变化即切分（处理缺字回退，如 æ/ŋ/ð 等）
+            f0 = pick_font(fb, style, ch, size, serif)
             buf = ch
-            ipa0 = is_ipa(ch)
             k = j + 1
-            while k < L and not (text[k] == " " or is_cjk(text[k]) or is_emoji(text[k]) or text[k] == "\n") \
-                    and is_ipa(text[k]) == ipa0:
-                buf += text[k]
+            while k < L:
+                c2 = text[k]
+                if c2 == " " or is_cjk(c2) or is_emoji(c2) or c2 == "\n":
+                    break
+                if pick_font(fb, style, c2, size, serif) is not f0:
+                    break
+                buf += c2
                 k += 1
-            f = pick_font(fb, style, ch, size, serif)
-            atoms.append(Atom(buf, "word", style, f, f.getlength(buf)))
+            atoms.append(Atom(buf, "word", style, f0, f0.getlength(buf)))
             j = k
     return atoms
 
@@ -539,6 +582,52 @@ class Ctx:
     pass
 
 
+def build_tag_pills(tags, cfg, fb):
+    """把标签渲染成 Dribbble 风格的彩色胶囊（pill），自动折行。返回 rows。"""
+    cw = cfg["content_w"]
+    tsize = int(cfg["body"] * 0.80)
+    f = fb.get("cjk", tsize)
+    asc, desc = f.getmetrics()
+    txt_h = asc + desc
+    pad_x = int(tsize * 0.70)
+    pad_y = int(tsize * 0.42)
+    pill_h = txt_h + pad_y * 2
+    gap = int(tsize * 0.5)
+    line_gap = int(tsize * 0.5)
+
+    pills = [(t, int(f.getlength(t)) + pad_x * 2) for t in tags]
+    lines = []
+    cur = []
+    curw = 0
+    for t, w in pills:
+        add = w + (gap if cur else 0)
+        if cur and curw + add > cw:
+            lines.append(cur)
+            cur = []
+            curw = 0
+            add = w
+        cur.append((t, w))
+        curw += add
+    if cur:
+        lines.append(cur)
+
+    rows = []
+    n = len(lines)
+    for li, ln in enumerate(lines):
+        def make(ln):
+            def _d(img, draw, x, y):
+                cx = x
+                for t, w in ln:
+                    draw.rounded_rectangle([cx, y, cx + w, y + pill_h],
+                                           radius=pill_h // 2, fill=cfg["tag_bg"])
+                    draw.text((cx + w / 2, y + pill_h / 2), t, font=f,
+                              fill=cfg["tag_fg"], anchor="mm")
+                    cx += w + gap
+            return _d
+        rows.append({"h": pill_h + (line_gap if li < n - 1 else 0), "draw": make(ln)})
+    return rows
+
+
 def build_rows(blocks, cfg, fb):
     rows = []
     cw = cfg["content_w"]
@@ -617,19 +706,38 @@ def build_rows(blocks, cfg, fb):
             if bi > 0:
                 add_spacer(cfg["block_gap"])
 
-            def emit_para_lines(rns):
-                atoms = atomize(rns, fb, BODY, serif=False)
+            def emit_lines(rns, size, font, color, serif=False):
+                atoms = atomize(rns, fb, size, serif=serif)
+                lh = int(size * 1.6)
                 for ln in wrap_atoms(atoms, cw):
                     rows.append({
-                        "h": body_lh,
-                        "draw": (lambda ln: (lambda img, draw, x, y: draw_line(
-                            img, draw, ln, x, y, pf, text_color, accent, code_bg, code_fg)))(ln),
+                        "h": lh,
+                        "draw": (lambda ln, font, color: (lambda img, draw, x, y: draw_line(
+                            img, draw, ln, x, y, font, color, accent, code_bg, code_fg)))(ln, font, color),
                     })
 
-            emit_para_lines(head_runs)
+            # Hero 词卡：加粗词开头且含音标(/.../) → 词放大成 hero，音标行浅灰
+            is_hero = bool(head_runs) and head_runs[0][1] == "bold" and \
+                any("/" in t for t, s in head_runs)
+            if is_hero:
+                headword = head_runs[0][0].strip()
+                rest = head_runs[1:]
+                while rest and rest[0][1] == "normal" and rest[0][0].strip() == "":
+                    rest = rest[1:]
+                hsize = cfg["hero"]
+                emit_lines([(headword, "bold")], hsize, fb.get("cjk_bold", hsize), text_color)
+                if rest:
+                    add_spacer(int(body_lh * 0.30))
+                    emit_lines(rest, BODY, pf, cfg["sub_color"])
+            else:
+                emit_lines(head_runs, BODY, pf, text_color)
+
             if tag_runs:
-                add_spacer(int(body_lh * 0.22))  # 音标与标签之间留白
-                emit_para_lines(tag_runs)
+                tags = [t for t, s in tag_runs if s == "code"]
+                if tags:
+                    add_spacer(int(body_lh * 0.36))
+                    for r in build_tag_pills(tags, cfg, fb):
+                        rows.append(r)
             continue
 
         if bt == "list":
@@ -743,8 +851,10 @@ def build_rows(blocks, cfg, fb):
                 atoms = atomize(runs, fb, tsize, serif=False)
                 return wrap_atoms(atoms, w - cellpad * 2)
 
-            # 预排每一行高度
-            def row_render(cells, bold, header):
+            # 预排每一行（整张表作为不可分页的圆角整块）
+            R = cfg["quote_radius"]
+
+            def measure(cells, bold):
                 per_cell = []
                 maxlines = 1
                 for c in range(ncol):
@@ -752,30 +862,54 @@ def build_rows(blocks, cfg, fb):
                     ls = cell_lines(txt, colw[c], bold=bold)
                     per_cell.append(ls)
                     maxlines = max(maxlines, len(ls))
-                h = maxlines * tlh + cellpad * 2
+                return maxlines * tlh + cellpad * 2, per_cell
 
-                def _d(img, draw, x, y, _per=per_cell, _h=h, _header=header):
-                    cx = x
-                    if _header:
-                        draw.rectangle([x, y, x + cw, y + _h], fill=cfg["accent"])
-                    for c in range(ncol):
-                        # 边框
-                        draw.rectangle([cx, y, cx + colw[c], y + _h], outline=cfg["table_border"], width=1)
-                        pf = fb.get("cjk", tsize)
-                        ty = y + cellpad
-                        for ln in _per[c]:
-                            col = (255, 255, 255) if _header else cfg["text_color"]
-                            draw_line(img, draw, ln, cx + cellpad, ty, pf, col,
-                                      cfg["accent"], cfg["code_bg"], cfg["code_fg"])
-                            ty += tlh
-                        cx += colw[c]
-                return h, _d
-
-            h, d = row_render(blk["header"], True, True)
-            rows.append({"h": h, "draw": d, "keepnext": True})
+            rowinfos = []
+            hh, hc = measure(blk["header"], True)
+            rowinfos.append((hh, hc, True))
             for r in blk["rows"]:
-                h, d = row_render(r, False, False)
-                rows.append({"h": h, "draw": d})
+                rh, pc = measure(r, False)
+                rowinfos.append((rh, pc, False))
+            total_h = sum(ri[0] for ri in rowinfos)
+
+            def make_table_draw(rowinfos, total_h, colw, R):
+                def _d(img, draw, x, y):
+                    pf = fb.get("cjk", tsize)
+                    header_h = rowinfos[0][0]
+                    draw.rounded_rectangle([x, y, x + cw, y + total_h], radius=R, fill=(255, 255, 255))
+                    draw.rounded_rectangle([x, y, x + cw, y + header_h], radius=R,
+                                           corners=(True, True, False, False), fill=cfg["accent"])
+                    # 行分隔线（表头之后）
+                    yy = 0
+                    for i, (rh, pc, is_h) in enumerate(rowinfos):
+                        if i > 0:
+                            draw.line([x, y + yy, x + cw, y + yy], fill=cfg["table_border"], width=2)
+                        yy += rh
+                    # 列分隔线（仅正文区）
+                    cx = x
+                    for c in range(ncol - 1):
+                        cx += colw[c]
+                        draw.line([cx, y + header_h, cx, y + total_h - R // 2],
+                                  fill=cfg["table_border"], width=2)
+                    # 文本
+                    yy = y
+                    for (rh, pc, is_h) in rowinfos:
+                        cx = x
+                        for c in range(ncol):
+                            col = (255, 255, 255) if is_h else cfg["text_color"]
+                            ty = yy + cellpad
+                            for ln in pc[c]:
+                                draw_line(img, draw, ln, cx + cellpad, ty, pf, col,
+                                          cfg["accent"], cfg["code_bg"], cfg["code_fg"])
+                                ty += tlh
+                            cx += colw[c]
+                        yy += rh
+                    draw.rounded_rectangle([x, y, x + cw, y + total_h], radius=R,
+                                           outline=cfg["table_border"], width=2)
+                return _d
+
+            rows.append({"h": total_h, "draw": make_table_draw(rowinfos, total_h, colw, R),
+                         "keepnext": False})
             continue
 
         if bt == "image":
@@ -943,44 +1077,90 @@ def render_card(page_rows, cfg, fb, page_no, total, footer_left):
     return img.convert("RGB")
 
 
+def render_total(rows, cfg, fb, footer_left):
+    """把所有内容渲染成一张长图（不分页）。满版白底。"""
+    W = cfg["W"]
+    M = cfg["margin"]
+    PAD = cfg["pad"]
+
+    rr = [r for r in rows]
+    while rr and rr[0].get("spacer"):
+        rr.pop(0)
+    while rr and rr[-1].get("spacer"):
+        rr.pop()
+    content_h = sum(r["h"] for r in rr)
+    footer_band = int(PAD * 1.0) + cfg["footer"]
+    H = M * 2 + PAD * 2 + content_h + footer_band
+
+    img = Image.new("RGBA", (W, H), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    x0 = M + PAD
+    y = M + PAD
+    for r in rr:
+        if r.get("draw"):
+            r["draw"](img, draw, x0, y)
+        y += r["h"]
+
+    fsize = cfg["footer"]
+    fy = H - M - int(PAD * 0.5)
+    if footer_left:
+        draw.text((x0, fy), footer_left, font=fb.get("cjk", fsize),
+                  fill=(170, 175, 185, 255), anchor="lm")
+    draw.text((W - M - PAD, fy), "全文", font=fb.get("cjk_bold", fsize),
+              fill=cfg["accent"] + (255,), anchor="rm")
+
+    return img.convert("RGB"), H
+
+
 # ----------------------------------------------------------------------------
 # 配置
 # ----------------------------------------------------------------------------
-def build_cfg(args, theme):
+def build_cfg(args, theme, fscale=1.0):
     SS = args.scale
-    def s(v):
+
+    def s(v):                       # 固定盒子尺寸（图片/边距/内边距，不随字号缩放）
         return int(round(v * SS))
+
+    def fs(v):                      # 字号/间距，随 fscale 缩放以适配页数上限
+        return int(round(v * SS * fscale))
 
     W = s(args.width)
     H = s(int(args.width * args.ratio_h / args.ratio_w))
     M = s(args.margin)
-    PAD = s(60)
+    PAD = s(64)
     content_w = W - 2 * M - 2 * PAD
-    footer_h = s(56)
+    footer_h = s(58)
     content_h = H - 2 * M - 2 * PAD - footer_h
 
-    body = s(33)
+    ax = theme["accent"]
+    tag_bg = tuple(int(c + (255 - c) * 0.85) for c in ax)   # accent 浅色调底（胶囊）
+    tag_fg = tuple(int(c * 0.70) for c in ax)               # 深一点的 accent 文字
+
+    body = fs(37)
     cfg = {
         "SS": SS, "W": W, "H": H, "margin": M, "pad": PAD,
         "content_w": content_w, "content_h": content_h,
         "panel_radius": s(40) if M > 0 else 0, "shadow_blur": s(18),
-        "h1": s(56), "h2": s(48), "h3": s(40),
-        "body": body, "body_lh": int(body * 1.68),
-        "quote": s(32), "quote_pad": s(24), "quote_radius": s(16),
-        "table": s(29), "cell_pad": s(16),
-        "footer": s(24),
-        "block_gap": s(26),
-        "bar_w": s(8), "bar_gap": s(18),
-        "img_max_h": s(390), "img_radius": s(18),
-        "text_color": (33, 37, 48),
-        "sub_color": (90, 96, 110),
+        "hero": fs(76), "h1": fs(60), "h2": fs(56), "h3": fs(46),
+        "body": body, "body_lh": int(body * 1.6),
+        "quote": fs(36), "quote_pad": fs(28), "quote_radius": fs(18),
+        "table": fs(33), "cell_pad": fs(18),
+        "footer": fs(25),
+        "block_gap": fs(32),
+        "bar_w": fs(9), "bar_gap": fs(20),
+        "img_max_h": fs(400), "img_radius": fs(20),
+        "text_color": (28, 31, 42),
+        "sub_color": (120, 126, 140),
         "accent": theme["accent"],
-        "code_bg": (238, 240, 248),
-        "code_fg": (90, 80, 170),
+        "code_bg": tag_bg,
+        "code_fg": tag_fg,
+        "tag_bg": tag_bg,
+        "tag_fg": tag_fg,
         "quote_bg": (246, 248, 252),
         "quote_bar": theme["accent"],
         "quote_text": (70, 80, 96),
-        "table_border": (224, 228, 236),
+        "table_border": (226, 230, 238),
         "theme": theme,
     }
     return cfg
@@ -993,7 +1173,7 @@ def main():
     ap = argparse.ArgumentParser(description="把 Markdown 渲染成小红书图片（纯命令行，无浏览器）")
     ap.add_argument("md", help="Markdown 文件路径")
     ap.add_argument("-o", "--out", default="output", help="输出目录（默认 ./output）")
-    ap.add_argument("--theme", default="indigo", choices=list(THEMES.keys()), help="配色主题")
+    ap.add_argument("--theme", default="mono", choices=list(THEMES.keys()), help="配色主题（默认 mono 黑白）")
     ap.add_argument("--width", type=int, default=1080, help="图片宽度像素（默认 1080）")
     ap.add_argument("--margin", type=int, default=0,
                     help="外边框宽度px（默认 0=满版铺满；>0 时显示渐变边框+圆角白卡）")
@@ -1001,6 +1181,8 @@ def main():
     ap.add_argument("--ratio-h", type=float, default=4, help="高比（默认 4）")
     ap.add_argument("--scale", type=int, default=2, help="超采样倍数，越大越清晰（默认 2）")
     ap.add_argument("--format", default="png", choices=["png", "jpg"], help="输出格式")
+    ap.add_argument("--max-pages", type=int, default=4,
+                    help="卡片张数上限（默认 4，适配 Twitter 单条 4 图）；超出则自动微缩字号重排。设 0 不限制")
     args = ap.parse_args()
 
     if not os.path.isfile(args.md):
@@ -1011,41 +1193,66 @@ def main():
         text = f.read()
 
     theme = THEMES[args.theme]
-    cfg = build_cfg(args, theme)
     fb = FontBook()
-
     blocks = parse_markdown(text)
-    rows = build_rows(blocks, cfg, fb)
-    pages = paginate(rows, cfg["content_h"])
+
+    # 自动适配页数上限：超过 max_pages 则按比例微缩字号重排（设下限避免过小）
+    fscale = 1.0
+    while True:
+        cfg = build_cfg(args, theme, fscale)
+        rows = build_rows(blocks, cfg, fb)
+        pages = paginate(rows, cfg["content_h"])
+        if args.max_pages <= 0 or len(pages) <= args.max_pages or fscale <= 0.66:
+            break
+        fscale -= 0.05
 
     stem = os.path.splitext(os.path.basename(args.md))[0]
-    footer_left = stem.split("：")[-1].split(":")[-1].strip()
-    if len(footer_left) > 24:
-        footer_left = footer_left[:24]
+    word = stem.split("：")[-1].split(":")[-1].strip()
+    word = re.sub(r"[\\/:*?\"<>|\s]", "_", word) or "word"
+    footer_left = word[:24]
 
-    os.makedirs(args.out, exist_ok=True)
+    # 子文件夹：日期_单词；同一文件夹内每次成功生成 version 自增
+    date = datetime.date.today().strftime("%Y%m%d")
+    out_dir = os.path.join(args.out, f"{date}_{word}")
+    os.makedirs(out_dir, exist_ok=True)
+
+    ext = "jpg" if args.format == "jpg" else "png"
+    ver_re = re.compile(rf"^{re.escape(word)}_v(\d+)_\d+\.{ext}$")
+    prev = [int(m.group(1)) for f in os.listdir(out_dir)
+            for m in [ver_re.match(f)] if m]
+    version = (max(prev) + 1) if prev else 1
+
     total = len(pages)
     out_paths = []
     for idx, pg in enumerate(pages, 1):
         card = render_card(pg, cfg, fb, idx, total, footer_left)
-        # 缩放回目标尺寸
         target = (args.width, int(args.width * args.ratio_h / args.ratio_w))
         if cfg["SS"] != 1:
             card = card.resize(target, Image.LANCZOS)
-        ext = "jpg" if args.format == "jpg" else "png"
-        name = f"{stem}_{idx:02d}.{ext}"
-        # 文件名安全化
-        name = re.sub(r"[\\/:*?\"<>|]", "_", name)
-        path = os.path.abspath(os.path.join(args.out, name))
+        name = f"{word}_v{version}_{idx:02d}.{ext}"
+        path = os.path.abspath(os.path.join(out_dir, name))
         if ext == "jpg":
             card.save(path, "JPEG", quality=92)
         else:
             card.save(path, "PNG")
         out_paths.append(path)
 
-    print(f"✅ 生成 {total} 张图片 ({target[0]}x{target[1]}, 主题 {args.theme}):")
+    # total 长图（所有内容拼成一张）
+    total_img, th = render_total(rows, cfg, fb, footer_left)
+    if cfg["SS"] != 1:
+        total_img = total_img.resize((args.width, int(round(th / cfg["SS"]))), Image.LANCZOS)
+    total_name = f"{word}_v{version}_total.{ext}"
+    total_path = os.path.abspath(os.path.join(out_dir, total_name))
+    if ext == "jpg":
+        total_img.save(total_path, "JPEG", quality=92)
+    else:
+        total_img.save(total_path, "PNG")
+
+    print(f"✅ 生成 {total} 张图片 ({target[0]}x{target[1]}, 主题 {args.theme}, 版本 v{version}):")
+    print(f"  目录: {os.path.abspath(out_dir)}")
     for p in out_paths:
         print("  " + p)
+    print(f"  [total] {total_path}")
 
 
 if __name__ == "__main__":
