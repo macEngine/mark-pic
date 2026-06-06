@@ -534,6 +534,9 @@ def wrap_atoms(atoms, max_w):
 # ----------------------------------------------------------------------------
 # 绘制一行（混合字体，基线对齐，代码 chip）
 # ----------------------------------------------------------------------------
+_RENDER = {"code_border": None, "ss": 2}   # 渲染期开关（chip 边框等），main 中按 cfg 设置
+
+
 def draw_line(img, draw, atoms, x, y, primary_font, color, accent, code_bg, code_fg):
     asc, desc = primary_font.getmetrics()
     baseline = y + asc
@@ -557,9 +560,12 @@ def draw_line(img, draw, atoms, x, y, primary_font, color, accent, code_bg, code
             last_a, last_x = positions[j - 1]
             x1 = last_x + last_a.width
             pad = max(4, asc // 6)
-            draw.rounded_rectangle(
-                [x0 - pad, baseline - asc + pad // 2, x1 + pad, baseline + desc - pad // 2],
-                radius=max(6, asc // 4), fill=code_bg)
+            rect = [x0 - pad, baseline - asc + pad // 2, x1 + pad, baseline + desc - pad // 2]
+            rad = max(6, asc // 4)
+            draw.rounded_rectangle(rect, radius=rad, fill=code_bg)
+            cb = _RENDER.get("code_border")
+            if cb:
+                draw.rounded_rectangle(rect, radius=rad, outline=cb, width=max(1, _RENDER.get("ss", 2)))
             k = j
         else:
             k += 1
@@ -672,12 +678,12 @@ def build_rows(blocks, cfg, fb):
             breakbefore = False
             first_heading_seen[0] = True
 
-            indent = (cfg["bar_w"] + cfg["bar_gap"]) if level == 2 else 0
-            hcolor = accent if level == 2 else text_color
+            indent = (cfg["bar_w"] + cfg["bar_gap"]) if (cfg.get("heading_bar", True) and level == 2) else 0
+            hcolor = cfg.get("heading_color", accent) if level == 2 else text_color
 
             def make_heading_draw(lines, pf, lh, level, indent, hcolor, size, total_h):
                 def _d(img, draw, x, y):
-                    if level == 2:
+                    if cfg.get("heading_bar", True) and level == 2:
                         bar_h = total_h
                         draw.rounded_rectangle(
                             [x, y + int(size * 0.08), x + cfg["bar_w"], y + bar_h - int(size * 0.12)],
@@ -706,20 +712,21 @@ def build_rows(blocks, cfg, fb):
             if bi > 0:
                 add_spacer(cfg["block_gap"])
 
-            def emit_lines(rns, size, font, color, serif=False):
+            def emit_lines(rns, size, font, color, serif=False, center=False):
                 atoms = atomize(rns, fb, size, serif=serif)
-                lh = int(size * 1.6)
+                lh = int(size * (1.8 if cfg.get("wechat") else 1.6))
                 for ln in wrap_atoms(atoms, cw):
+                    lw = sum(a.width for a in ln)
+                    off = int((cw - lw) / 2) if center else 0
                     rows.append({
                         "h": lh,
-                        "draw": (lambda ln, font, color: (lambda img, draw, x, y: draw_line(
-                            img, draw, ln, x, y, font, color, accent, code_bg, code_fg)))(ln, font, color),
+                        "draw": (lambda ln, font, color, off: (lambda img, draw, x, y: draw_line(
+                            img, draw, ln, x + off, y, font, color, accent, code_bg, code_fg)))(ln, font, color, off),
                     })
 
-            # Hero 词卡：加粗词开头且含音标(/.../) → 词放大成 hero，音标行浅灰
-            is_hero = bool(head_runs) and head_runs[0][1] == "bold" and \
-                any("/" in t for t, s in head_runs)
-            if is_hero:
+            is_vocab = bool(head_runs) and head_runs[0][1] == "bold" and any("/" in t for t, s in head_runs)
+            if cfg.get("hero_enable", True) and is_vocab:
+                # Dribbble Hero 词卡：词放大成 hero，音标行浅灰
                 headword = head_runs[0][0].strip()
                 rest = head_runs[1:]
                 while rest and rest[0][1] == "normal" and rest[0][0].strip() == "":
@@ -729,15 +736,21 @@ def build_rows(blocks, cfg, fb):
                 if rest:
                     add_spacer(int(body_lh * 0.30))
                     emit_lines(rest, BODY, pf, cfg["sub_color"])
+            elif cfg.get("wechat") and is_vocab:
+                # 公众号：词 + 音标 居中一行
+                emit_lines(head_runs, BODY, pf, text_color, center=True)
             else:
                 emit_lines(head_runs, BODY, pf, text_color)
 
             if tag_runs:
                 tags = [t for t, s in tag_runs if s == "code"]
                 if tags:
-                    add_spacer(int(body_lh * 0.36))
-                    for r in build_tag_pills(tags, cfg, fb):
-                        rows.append(r)
+                    add_spacer(int(body_lh * 0.30))
+                    if cfg.get("tag_style") == "pill":
+                        for r in build_tag_pills(tags, cfg, fb):
+                            rows.append(r)
+                    else:
+                        emit_lines(tag_runs, BODY, pf, text_color, center=True)
             continue
 
         if bt == "list":
@@ -766,8 +779,9 @@ def build_rows(blocks, cfg, fb):
 
         if bt == "quote":
             qsize = cfg["quote"]
-            qlh = int(qsize * 1.62)
-            pf = fb.get("serif", qsize)
+            serif = cfg.get("quote_serif", True)
+            qlh = int(qsize * (1.8 if cfg.get("wechat") else 1.62))
+            pf = fb.get("serif" if serif else "cjk", qsize)
             if bi > 0:
                 add_spacer(cfg["block_gap"])
             qpad = cfg["quote_pad"]
@@ -777,7 +791,7 @@ def build_rows(blocks, cfg, fb):
             all_lines = []
             for pidx, p in enumerate(blk["paras"]):
                 runs = parse_inline(p)
-                atoms = atomize(runs, fb, qsize, serif=True)
+                atoms = atomize(runs, fb, qsize, serif=serif)
                 plines = wrap_atoms(atoms, inner_w)
                 all_lines.extend(plines)
                 if pidx < len(blk["paras"]) - 1:
@@ -787,10 +801,14 @@ def build_rows(blocks, cfg, fb):
 
             def make_quote_draw(all_lines, total_h, qlh, pf, qpad, bar, text_x, qbg):
                 def _d(img, draw, x, y):
-                    draw.rounded_rectangle([x, y, x + cw, y + total_h],
-                                           radius=cfg["quote_radius"], fill=qbg)
-                    draw.rounded_rectangle([x, y + bar, x + bar * 2, y + total_h - bar],
-                                           radius=bar, fill=cfg["quote_bar"])
+                    if qbg is not None:
+                        draw.rounded_rectangle([x, y, x + cw, y + total_h],
+                                               radius=cfg["quote_radius"], fill=qbg)
+                        draw.rounded_rectangle([x, y + bar, x + bar * 2, y + total_h - bar],
+                                               radius=bar, fill=cfg["quote_bar"])
+                    else:
+                        # 公众号风：仅左侧灰色竖线，无底色
+                        draw.rectangle([x, y, x + bar, y + total_h], fill=cfg["quote_bar"])
                     ty = y + qpad
                     for ln in all_lines:
                         if ln is not None:
@@ -851,8 +869,11 @@ def build_rows(blocks, cfg, fb):
                 atoms = atomize(runs, fb, tsize, serif=False)
                 return wrap_atoms(atoms, w - cellpad * 2)
 
-            # 预排每一行（整张表作为不可分页的圆角整块）
-            R = cfg["quote_radius"]
+            # 预排每一行（整张表作为不可分页的整块）
+            tround = cfg.get("table_round", True)
+            R = cfg["quote_radius"] if tround else 0
+            hfill = cfg.get("table_header_fill", cfg["accent"])
+            hfg = cfg.get("table_header_fg", (255, 255, 255))
 
             def measure(cells, bold):
                 per_cell = []
@@ -878,25 +899,26 @@ def build_rows(blocks, cfg, fb):
                     header_h = rowinfos[0][0]
                     draw.rounded_rectangle([x, y, x + cw, y + total_h], radius=R, fill=(255, 255, 255))
                     draw.rounded_rectangle([x, y, x + cw, y + header_h], radius=R,
-                                           corners=(True, True, False, False), fill=cfg["accent"])
+                                           corners=(True, True, False, False), fill=hfill)
                     # 行分隔线（表头之后）
                     yy = 0
                     for i, (rh, pc, is_h) in enumerate(rowinfos):
                         if i > 0:
                             draw.line([x, y + yy, x + cw, y + yy], fill=cfg["table_border"], width=2)
                         yy += rh
-                    # 列分隔线（仅正文区）
+                    # 列分隔线
+                    v_top = y if not tround else y + header_h
+                    v_bot = y + total_h if not tround else y + total_h - R // 2
                     cx = x
                     for c in range(ncol - 1):
                         cx += colw[c]
-                        draw.line([cx, y + header_h, cx, y + total_h - R // 2],
-                                  fill=cfg["table_border"], width=2)
+                        draw.line([cx, v_top, cx, v_bot], fill=cfg["table_border"], width=2)
                     # 文本
                     yy = y
                     for (rh, pc, is_h) in rowinfos:
                         cx = x
                         for c in range(ncol):
-                            col = (255, 255, 255) if is_h else cfg["text_color"]
+                            col = hfg if is_h else cfg["text_color"]
                             ty = yy + cellpad
                             for ln in pc[c]:
                                 draw_line(img, draw, ln, cx + cellpad, ty, pf, col,
@@ -915,19 +937,23 @@ def build_rows(blocks, cfg, fb):
         if bt == "image":
             if bi > 0:
                 add_spacer(cfg["block_gap"])
-            pim = load_remote_image(blk["url"], cw, cfg["img_max_h"])
+            # 图片填满“正文宽度”（与文字左右对齐），圆角 + 边框；高度自由但不超过页面
+            pim = load_remote_image(blk["url"], cw, cfg["content_h"], fill=True)
             if pim is None:
                 continue
 
             def make_img_draw(pim):
                 def _d(img, draw, x, y):
-                    ox = x + (cw - pim.width) // 2
-                    # 圆角
+                    ox = int(x + (cw - pim.width) // 2)   # x 即正文左边缘，与文字对齐
                     rad = cfg["img_radius"]
                     mask = Image.new("L", pim.size, 0)
                     md = ImageDraw.Draw(mask)
                     md.rounded_rectangle([0, 0, pim.width, pim.height], radius=rad, fill=255)
-                    img.paste(pim, (int(ox), int(y)), mask)
+                    img.paste(pim, (ox, int(y)), mask)
+                    ib = cfg.get("img_border")
+                    if ib:
+                        draw.rounded_rectangle([ox, int(y), ox + pim.width - 1, int(y) + pim.height - 1],
+                                               radius=rad, outline=ib, width=max(1, cfg["SS"]))
                 return _d
             rows.append({"h": pim.height, "draw": make_img_draw(pim), "keepnext": False})
             continue
@@ -938,7 +964,7 @@ def build_rows(blocks, cfg, fb):
 # ----------------------------------------------------------------------------
 # 远程/本地图片加载
 # ----------------------------------------------------------------------------
-def load_remote_image(url, max_w, max_h):
+def load_remote_image(url, max_w, max_h, fill=False):
     try:
         data = None
         if url.startswith("http://") or url.startswith("https://"):
@@ -951,9 +977,14 @@ def load_remote_image(url, max_w, max_h):
         else:
             im = Image.open(url).convert("RGBA")
         w, h = im.size
-        scale = min(max_w / w, max_h / h, 1.0) if (w > max_w or h > max_h) else min(max_w / w, 1.0)
-        # 宽度优先填满到 max_w，但限制高度
-        scale = min(max_w / w, max_h / h)
+        if fill:
+            # 满宽：强制缩放到 max_w（高度自由，仅做一个很宽松的上限保护）
+            scale = max_w / w
+            if h * scale > max_h:
+                scale = max_h / w * (max_w / max_w)  # 不再额外压缩，保持满宽
+                scale = max_w / w
+        else:
+            scale = min(max_w / w, max_h / h)
         nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
         return im.resize((nw, nh), Image.LANCZOS)
     except Exception as e:
@@ -1133,37 +1164,67 @@ def build_cfg(args, theme, fscale=1.0):
     footer_h = s(58)
     content_h = H - 2 * M - 2 * PAD - footer_h
 
-    ax = theme["accent"]
-    tag_bg = tuple(int(c + (255 - c) * 0.85) for c in ax)   # accent 浅色调底（胶囊）
-    tag_fg = tuple(int(c * 0.70) for c in ax)               # 深一点的 accent 文字
-
-    body = fs(37)
-    cfg = {
+    common = {
         "SS": SS, "W": W, "H": H, "margin": M, "pad": PAD,
         "content_w": content_w, "content_h": content_h,
         "panel_radius": s(40) if M > 0 else 0, "shadow_blur": s(18),
+        "theme": theme,
+    }
+
+    if args.style == "wechat":
+        # 样式来自 md-to-wechat.html（微信公众号文章风格）
+        body = fs(29)
+        cfg = dict(common)
+        cfg.update({
+            "style": "wechat", "wechat": True,
+            "hero_enable": False, "heading_bar": False,
+            "hero": fs(40), "h1": fs(34), "h2": fs(38), "h3": fs(29),
+            "body": body, "body_lh": int(body * 1.8),
+            "quote": fs(26), "quote_pad": fs(18), "quote_radius": 0,
+            "quote_serif": False, "quote_bg": None,
+            "quote_bar": (210, 210, 212), "quote_text": (26, 26, 26),
+            "table": fs(26), "cell_pad": fs(15),
+            "table_border": (221, 221, 221), "table_round": False,
+            "table_header_fill": (245, 245, 245), "table_header_fg": (0, 0, 0),
+            "footer": fs(24), "block_gap": fs(28),
+            "bar_w": fs(6), "bar_gap": fs(16),
+            "img_max_h": fs(440), "img_radius": s(8), "img_border": (221, 221, 221),
+            "text_color": (26, 26, 26), "sub_color": (115, 115, 115),
+            "accent": (26, 26, 26),
+            "code_bg": (235, 235, 235), "code_fg": (26, 26, 26), "code_border": (204, 204, 204),
+            "tag_style": "chip",
+            "heading_color": (0, 0, 0),
+        })
+        return cfg
+
+    # 默认/dribbble：大字号 hero + 彩色胶囊 + 圆角强调表格
+    ax = theme["accent"]
+    tag_bg = tuple(int(c + (255 - c) * 0.85) for c in ax)
+    tag_fg = tuple(int(c * 0.70) for c in ax)
+    body = fs(37)
+    cfg = dict(common)
+    cfg.update({
+        "style": "dribbble", "wechat": False,
+        "hero_enable": True, "heading_bar": True,
         "hero": fs(76), "h1": fs(60), "h2": fs(56), "h3": fs(46),
         "body": body, "body_lh": int(body * 1.6),
         "quote": fs(36), "quote_pad": fs(28), "quote_radius": fs(18),
+        "quote_serif": True, "quote_bg": (246, 248, 252),
+        "quote_bar": theme["accent"], "quote_text": (70, 80, 96),
         "table": fs(33), "cell_pad": fs(18),
-        "footer": fs(25),
-        "block_gap": fs(32),
+        "table_border": (226, 230, 238), "table_round": True,
+        "table_header_fill": theme["accent"], "table_header_fg": (255, 255, 255),
+        "footer": fs(25), "block_gap": fs(32),
         "bar_w": fs(9), "bar_gap": fs(20),
-        "img_max_h": fs(400), "img_radius": fs(20),
-        "text_color": (28, 31, 42),
-        "sub_color": (120, 126, 140),
+        "img_max_h": fs(400), "img_radius": fs(20), "img_border": None,
+        "text_color": (28, 31, 42), "sub_color": (120, 126, 140),
         "accent": theme["accent"],
-        "code_bg": tag_bg,
-        "code_fg": tag_fg,
-        "tag_bg": tag_bg,
-        "tag_fg": tag_fg,
-        "quote_bg": (246, 248, 252),
-        "quote_bar": theme["accent"],
-        "quote_text": (70, 80, 96),
-        "table_border": (226, 230, 238),
-        "theme": theme,
-    }
+        "code_bg": tag_bg, "code_fg": tag_fg, "code_border": None,
+        "tag_bg": tag_bg, "tag_fg": tag_fg, "tag_style": "pill",
+        "heading_color": theme["accent"],
+    })
     return cfg
+
 
 
 # ----------------------------------------------------------------------------
@@ -1172,8 +1233,11 @@ def build_cfg(args, theme, fscale=1.0):
 def main():
     ap = argparse.ArgumentParser(description="把 Markdown 渲染成小红书图片（纯命令行，无浏览器）")
     ap.add_argument("md", help="Markdown 文件路径")
-    ap.add_argument("-o", "--out", default="output", help="输出目录（默认 ./output）")
+    ap.add_argument("-o", "--out", default=os.path.expanduser("~/Downloads/a01_output"),
+                    help="输出目录（默认 ~/Downloads/a01_output，在 git 仓库之外）")
     ap.add_argument("--theme", default="mono", choices=list(THEMES.keys()), help="配色主题（默认 mono 黑白）")
+    ap.add_argument("--style", default="wechat", choices=["wechat", "dribbble"],
+                    help="排版风格：wechat=公众号文章风（默认）；dribbble=大字号卡片风")
     ap.add_argument("--width", type=int, default=1080, help="图片宽度像素（默认 1080）")
     ap.add_argument("--margin", type=int, default=0,
                     help="外边框宽度px（默认 0=满版铺满；>0 时显示渐变边框+圆角白卡）")
@@ -1205,6 +1269,9 @@ def main():
         if args.max_pages <= 0 or len(pages) <= args.max_pages or fscale <= 0.66:
             break
         fscale -= 0.05
+
+    _RENDER["code_border"] = cfg.get("code_border")
+    _RENDER["ss"] = cfg["SS"]
 
     stem = os.path.splitext(os.path.basename(args.md))[0]
     word = stem.split("：")[-1].split(":")[-1].strip()
