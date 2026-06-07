@@ -1304,22 +1304,22 @@ def main():
             card.save(path, "PNG")
         out_paths.append(path)
 
-    # total 长图（所有内容拼成一张）
-    total_img, th = render_total(rows, cfg, fb, footer_left)
-    if cfg["SS"] != 1:
-        total_img = total_img.resize((args.width, int(round(th / cfg["SS"]))), Image.LANCZOS)
-    total_name = f"{word}_v{version}_total.{ext}"
-    total_path = os.path.abspath(os.path.join(out_dir, total_name))
-    if ext == "jpg":
-        total_img.save(total_path, "JPEG", quality=92)
-    else:
-        total_img.save(total_path, "PNG")
+    # total 长图（所有内容拼成一张）—— 暂时停用，保留以后再启用
+    # total_img, th = render_total(rows, cfg, fb, footer_left)
+    # if cfg["SS"] != 1:
+    #     total_img = total_img.resize((args.width, int(round(th / cfg["SS"]))), Image.LANCZOS)
+    # total_name = f"{word}_v{version}_total.{ext}"
+    # total_path = os.path.abspath(os.path.join(out_dir, total_name))
+    # if ext == "jpg":
+    #     total_img.save(total_path, "JPEG", quality=92)
+    # else:
+    #     total_img.save(total_path, "PNG")
 
     print(f"✅ 生成 {total} 张图片 ({target[0]}x{target[1]}, 主题 {args.theme}, 版本 v{version}):")
     print(f"  目录: {os.path.abspath(out_dir)}")
     for p in out_paths:
         print("  " + p)
-    print(f"  [total] {total_path}")
+    # print(f"  [total] {total_path}")
 
 
 if __name__ == "__main__":
