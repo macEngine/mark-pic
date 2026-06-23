@@ -850,16 +850,18 @@ def build_rows(blocks, cfg, fb):
                         if a.kind == "word":
                             longest_word = max(longest_word, a.width)
                 min_w.append(longest_word + cellpad * 2)
-                pref_w.append(min(total_pref + cellpad * 2, cw * 0.62))
+                pref_w.append(total_pref + cellpad * 2)
 
-            base = sum(min_w)
-            if base <= cw:
-                extra = cw - base
-                pref_extra = [max(0, pref_w[c] - min_w[c]) for c in range(ncol)]
-                tot_pe = sum(pref_extra) or 1
-                colw = [int(min_w[c] + extra * pref_extra[c] / tot_pe) for c in range(ncol)]
-            else:
-                colw = [int(w / base * cw) for w in min_w]
+            # 按 pref_w 比例分配总宽度 cw，但保证每列至少 min_w
+            tot_pref = sum(pref_w) or 1
+            colw = [max(int(pref_w[c] / tot_pref * cw), int(min_w[c])) for c in range(ncol)]
+            # 归一化到 cw
+            while sum(colw) > cw:
+                widest = max(range(ncol), key=lambda c: colw[c] - min_w[c])
+                colw[widest] -= 1
+            while sum(colw) < cw:
+                narrowest = min(range(ncol), key=lambda c: colw[c])
+                colw[narrowest] += 1
             colw[-1] = cw - sum(colw[:-1])
 
             def cell_lines(text, w, bold=False):
@@ -1159,7 +1161,7 @@ def build_cfg(args, theme, fscale=1.0):
     W = s(args.width)
     H = s(int(args.width * args.ratio_h / args.ratio_w))
     M = s(args.margin)
-    PAD = s(64)
+    PAD = s(40)
     content_w = W - 2 * M - 2 * PAD
     footer_h = s(58)
     content_h = H - 2 * M - 2 * PAD - footer_h
@@ -1173,20 +1175,20 @@ def build_cfg(args, theme, fscale=1.0):
 
     if args.style == "wechat":
         # 样式来自 md-to-wechat.html（微信公众号文章风格）
-        body = fs(29)
+        body = fs(38)
         cfg = dict(common)
         cfg.update({
             "style": "wechat", "wechat": True,
             "hero_enable": False, "heading_bar": False,
-            "hero": fs(40), "h1": fs(34), "h2": fs(38), "h3": fs(29),
-            "body": body, "body_lh": int(body * 1.8),
-            "quote": fs(26), "quote_pad": fs(18), "quote_radius": 0,
+            "hero": fs(52), "h1": fs(46), "h2": fs(50), "h3": fs(38),
+            "body": body, "body_lh": int(body * 1.75),
+            "quote": fs(34), "quote_pad": fs(22), "quote_radius": 0,
             "quote_serif": False, "quote_bg": None,
             "quote_bar": (210, 210, 212), "quote_text": (26, 26, 26),
-            "table": fs(26), "cell_pad": fs(15),
+            "table": fs(34), "cell_pad": fs(18),
             "table_border": (221, 221, 221), "table_round": False,
             "table_header_fill": (245, 245, 245), "table_header_fg": (0, 0, 0),
-            "footer": fs(24), "block_gap": fs(28),
+            "footer": fs(28), "block_gap": fs(34),
             "bar_w": fs(6), "bar_gap": fs(16),
             "img_max_h": fs(440), "img_radius": s(8), "img_border": (221, 221, 221),
             "text_color": (26, 26, 26), "sub_color": (115, 115, 115),
@@ -1242,11 +1244,11 @@ def main():
     ap.add_argument("--margin", type=int, default=0,
                     help="外边框宽度px（默认 0=满版铺满；>0 时显示渐变边框+圆角白卡）")
     ap.add_argument("--ratio-w", type=float, default=3, help="宽比（默认 3）")
-    ap.add_argument("--ratio-h", type=float, default=4, help="高比（默认 4）")
+    ap.add_argument("--ratio-h", type=float, default=5, help="高比（默认 5，即 3:5）")
     ap.add_argument("--scale", type=int, default=2, help="超采样倍数，越大越清晰（默认 2）")
     ap.add_argument("--format", default="png", choices=["png", "jpg"], help="输出格式")
-    ap.add_argument("--max-pages", type=int, default=4,
-                    help="卡片张数上限（默认 4，适配 Twitter 单条 4 图）；超出则自动微缩字号重排。设 0 不限制")
+    ap.add_argument("--max-pages", type=int, default=5,
+                    help="卡片张数上限（默认 5）；超出则自动微缩字号重排。设 0 不限制")
     args = ap.parse_args()
 
     if not os.path.isfile(args.md):
@@ -1260,66 +1262,59 @@ def main():
     fb = FontBook()
     blocks = parse_markdown(text)
 
-    # 自动适配页数上限：超过 max_pages 则按比例微缩字号重排（设下限避免过小）
-    fscale = 1.0
-    while True:
-        cfg = build_cfg(args, theme, fscale)
-        rows = build_rows(blocks, cfg, fb)
-        pages = paginate(rows, cfg["content_h"])
-        if args.max_pages <= 0 or len(pages) <= args.max_pages or fscale <= 0.66:
-            break
-        fscale -= 0.05
-
-    _RENDER["code_border"] = cfg.get("code_border")
-    _RENDER["ss"] = cfg["SS"]
-
     stem = os.path.splitext(os.path.basename(args.md))[0]
     word = stem.split("：")[-1].split(":")[-1].strip()
     word = re.sub(r"[\\/:*?\"<>|\s]", "_", word) or "word"
     footer_left = word[:24]
-
-    # 子文件夹：日期_单词；同一文件夹内每次成功生成 version 自增
     date = datetime.date.today().strftime("%Y%m%d")
-    out_dir = os.path.join(args.out, f"{date}_{word}")
-    os.makedirs(out_dir, exist_ok=True)
-
     ext = "jpg" if args.format == "jpg" else "png"
-    ver_re = re.compile(rf"^{re.escape(word)}_v(\d+)_\d+\.{ext}$")
-    prev = [int(m.group(1)) for f in os.listdir(out_dir)
-            for m in [ver_re.match(f)] if m]
-    version = (max(prev) + 1) if prev else 1
+    target = (args.width, int(args.width * args.ratio_h / args.ratio_w))
 
-    total = len(pages)
-    out_paths = []
-    for idx, pg in enumerate(pages, 1):
-        card = render_card(pg, cfg, fb, idx, total, footer_left)
-        target = (args.width, int(args.width * args.ratio_h / args.ratio_w))
-        if cfg["SS"] != 1:
-            card = card.resize(target, Image.LANCZOS)
-        name = f"{word}_v{version}_{idx:02d}.{ext}"
-        path = os.path.abspath(os.path.join(out_dir, name))
-        if ext == "jpg":
-            card.save(path, "JPEG", quality=92)
-        else:
-            card.save(path, "PNG")
-        out_paths.append(path)
+    def generate_set(platform, max_pages):
+        """生成一套卡片到 platform 子目录（如 xhs/ 或 twitter/）"""
+        fscale = 1.0
+        while True:
+            cfg = build_cfg(args, theme, fscale)
+            rows = build_rows(blocks, cfg, fb)
+            pages = paginate(rows, cfg["content_h"])
+            if max_pages <= 0 or len(pages) <= max_pages or fscale <= 0.66:
+                break
+            fscale -= 0.05
 
-    # total 长图（所有内容拼成一张）—— 暂时停用，保留以后再启用
-    # total_img, th = render_total(rows, cfg, fb, footer_left)
-    # if cfg["SS"] != 1:
-    #     total_img = total_img.resize((args.width, int(round(th / cfg["SS"]))), Image.LANCZOS)
-    # total_name = f"{word}_v{version}_total.{ext}"
-    # total_path = os.path.abspath(os.path.join(out_dir, total_name))
-    # if ext == "jpg":
-    #     total_img.save(total_path, "JPEG", quality=92)
-    # else:
-    #     total_img.save(total_path, "PNG")
+        _RENDER["code_border"] = cfg.get("code_border")
+        _RENDER["ss"] = cfg["SS"]
 
-    print(f"✅ 生成 {total} 张图片 ({target[0]}x{target[1]}, 主题 {args.theme}, 版本 v{version}):")
-    print(f"  目录: {os.path.abspath(out_dir)}")
-    for p in out_paths:
-        print("  " + p)
-    # print(f"  [total] {total_path}")
+        out_dir = os.path.join(args.out, f"{date}_{word}", platform)
+        os.makedirs(out_dir, exist_ok=True)
+
+        ver_re = re.compile(rf"^{re.escape(word)}_v(\d+)_\d+\.{ext}$")
+        prev = [int(m.group(1)) for f in os.listdir(out_dir)
+                for m in [ver_re.match(f)] if m]
+        version = (max(prev) + 1) if prev else 1
+
+        total = len(pages)
+        out_paths = []
+        for idx, pg in enumerate(pages, 1):
+            card = render_card(pg, cfg, fb, idx, total, footer_left)
+            if cfg["SS"] != 1:
+                card = card.resize(target, Image.LANCZOS)
+            name = f"{word}_v{version}_{idx:02d}.{ext}"
+            path = os.path.abspath(os.path.join(out_dir, name))
+            if ext == "jpg":
+                card.save(path, "JPEG", quality=92)
+            else:
+                card.save(path, "PNG")
+            out_paths.append(path)
+
+        scale_note = f", fscale={fscale:.2f}" if fscale < 1.0 else ""
+        print(f"  [{platform}] {total} 张 v{version}{scale_note}")
+        for p in out_paths:
+            print(f"    {p}")
+
+    print(f"✅ 生成 ({target[0]}x{target[1]}, 主题 {args.theme}):")
+    print(f"  目录: {os.path.abspath(os.path.join(args.out, f'{date}_{word}'))}")
+    generate_set("xhs", 0)           # 小红书：不限页数
+    generate_set("twitter", 4)       # Twitter：最多 4 张
 
 
 if __name__ == "__main__":
