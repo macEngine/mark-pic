@@ -15,6 +15,7 @@ md2xhs.py — 纯命令行：把一个 Markdown 文件渲染成适合小红书�
 
 import argparse
 import datetime
+import math
 import os
 import re
 import sys
@@ -838,11 +839,17 @@ def build_rows(blocks, cfg, fb):
             min_w = []
             pref_w = []
             for c in range(ncol):
-                texts = [blk["header"][c]] + [r[c] if c < len(r) else "" for r in blk["rows"]]
+                header_text = blk["header"][c]
+                body_texts = [r[c] if c < len(r) else "" for r in blk["rows"]]
                 longest_word = tsize * 1.0
                 total_pref = tsize * 2.0
-                for t in texts:
-                    runs = parse_inline(t)
+                # header 测量时按 bold 渲染，跟实际渲染保持一致，避免标题被切断
+                header_runs = [(t, "bold" if s == "normal" else s)
+                               for t, s in parse_inline(header_text)]
+                measurements = [(header_runs, True)] + [
+                    (parse_inline(t), False) for t in body_texts
+                ]
+                for runs, _is_header in measurements:
                     atoms = atomize(runs, fb, tsize, serif=False)
                     line_w = sum(a.width for a in atoms)
                     total_pref = max(total_pref, line_w)
@@ -853,16 +860,21 @@ def build_rows(blocks, cfg, fb):
                 pref_w.append(total_pref + cellpad * 2)
 
             # 按 pref_w 比例分配总宽度 cw，但保证每列至少 min_w
+            # 用 ceil 把 min_w 取上整，避免 1px 误差让 colw 微低于浮点 min_w 触发字符级硬断
             tot_pref = sum(pref_w) or 1
-            colw = [max(int(pref_w[c] / tot_pref * cw), int(min_w[c])) for c in range(ncol)]
-            # 归一化到 cw
+            min_w_int = [int(math.ceil(m)) for m in min_w]
+            colw = [max(int(pref_w[c] / tot_pref * cw), min_w_int[c]) for c in range(ncol)]
+            # 归一化到 cw：收缩只针对“仍有 slack 的列”，避免把某列切到 min_w 以下导致单词被逐字符硬断
             while sum(colw) > cw:
-                widest = max(range(ncol), key=lambda c: colw[c] - min_w[c])
+                candidates = [c for c in range(ncol) if colw[c] > min_w_int[c]]
+                if not candidates:
+                    break  # 所有列都已贴到 min_w，再收缩就会切断单词，宁可让表格略微超宽
+                widest = max(candidates, key=lambda c: colw[c] - min_w_int[c])
                 colw[widest] -= 1
+            # 仍有剩余空间时，分给“pref_w 还没满足”的最饥饿列
             while sum(colw) < cw:
-                narrowest = min(range(ncol), key=lambda c: colw[c])
-                colw[narrowest] += 1
-            colw[-1] = cw - sum(colw[:-1])
+                hungriest = max(range(ncol), key=lambda c: pref_w[c] - colw[c])
+                colw[hungriest] += 1
 
             def cell_lines(text, w, bold=False):
                 runs = parse_inline(text)
@@ -1161,7 +1173,7 @@ def build_cfg(args, theme, fscale=1.0):
     W = s(args.width)
     H = s(int(args.width * args.ratio_h / args.ratio_w))
     M = s(args.margin)
-    PAD = s(40)
+    PAD = s(args.pad)
     content_w = W - 2 * M - 2 * PAD
     footer_h = s(58)
     content_h = H - 2 * M - 2 * PAD - footer_h
@@ -1243,6 +1255,8 @@ def main():
     ap.add_argument("--width", type=int, default=1080, help="图片宽度像素（默认 1080）")
     ap.add_argument("--margin", type=int, default=0,
                     help="外边框宽度px（默认 0=满版铺满；>0 时显示渐变边框+圆角白卡）")
+    ap.add_argument("--pad", type=int, default=28,
+                    help="内边距px（默认 28；减小可让内容更靠近边缘，适合小红书窄屏阅读）")
     ap.add_argument("--ratio-w", type=float, default=3, help="宽比（默认 3）")
     ap.add_argument("--ratio-h", type=float, default=5, help="高比（默认 5，即 3:5）")
     ap.add_argument("--scale", type=int, default=2, help="超采样倍数，越大越清晰（默认 2）")
@@ -1314,7 +1328,7 @@ def main():
     print(f"✅ 生成 ({target[0]}x{target[1]}, 主题 {args.theme}):")
     print(f"  目录: {os.path.abspath(os.path.join(args.out, f'{date}_{word}'))}")
     generate_set("xhs", 0)           # 小红书：不限页数
-    generate_set("twitter", 4)       # Twitter：最多 4 张
+    # generate_set("twitter", 4)       # Twitter：最多 4 张（暂时关闭）
 
 
 if __name__ == "__main__":
