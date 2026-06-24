@@ -1187,21 +1187,21 @@ def build_cfg(args, theme, fscale=1.0):
 
     if args.style == "wechat":
         # 样式来自 md-to-wechat.html（微信公众号文章风格）
-        body = fs(38)
+        body = fs(44)
         cfg = dict(common)
         cfg.update({
             "style": "wechat", "wechat": True,
             "hero_enable": False, "heading_bar": False,
-            "hero": fs(52), "h1": fs(46), "h2": fs(50), "h3": fs(38),
+            "hero": fs(60), "h1": fs(54), "h2": fs(58), "h3": fs(44),
             "body": body, "body_lh": int(body * 1.75),
-            "quote": fs(34), "quote_pad": fs(22), "quote_radius": 0,
+            "quote": fs(40), "quote_pad": fs(26), "quote_radius": 0,
             "quote_serif": False, "quote_bg": None,
             "quote_bar": (210, 210, 212), "quote_text": (26, 26, 26),
-            "table": fs(34), "cell_pad": fs(18),
+            "table": fs(40), "cell_pad": fs(22),
             "table_border": (221, 221, 221), "table_round": False,
             "table_header_fill": (245, 245, 245), "table_header_fg": (0, 0, 0),
-            "footer": fs(28), "block_gap": fs(34),
-            "bar_w": fs(6), "bar_gap": fs(16),
+            "footer": fs(32), "block_gap": fs(40),
+            "bar_w": fs(7), "bar_gap": fs(18),
             "img_max_h": fs(440), "img_radius": s(8), "img_border": (221, 221, 221),
             "text_color": (26, 26, 26), "sub_color": (115, 115, 115),
             "accent": (26, 26, 26),
@@ -1215,21 +1215,21 @@ def build_cfg(args, theme, fscale=1.0):
     ax = theme["accent"]
     tag_bg = tuple(int(c + (255 - c) * 0.85) for c in ax)
     tag_fg = tuple(int(c * 0.70) for c in ax)
-    body = fs(37)
+    body = fs(43)
     cfg = dict(common)
     cfg.update({
         "style": "dribbble", "wechat": False,
         "hero_enable": True, "heading_bar": True,
-        "hero": fs(76), "h1": fs(60), "h2": fs(56), "h3": fs(46),
+        "hero": fs(84), "h1": fs(68), "h2": fs(64), "h3": fs(52),
         "body": body, "body_lh": int(body * 1.6),
-        "quote": fs(36), "quote_pad": fs(28), "quote_radius": fs(18),
+        "quote": fs(42), "quote_pad": fs(32), "quote_radius": fs(20),
         "quote_serif": True, "quote_bg": (246, 248, 252),
         "quote_bar": theme["accent"], "quote_text": (70, 80, 96),
-        "table": fs(33), "cell_pad": fs(18),
+        "table": fs(39), "cell_pad": fs(22),
         "table_border": (226, 230, 238), "table_round": True,
         "table_header_fill": theme["accent"], "table_header_fg": (255, 255, 255),
-        "footer": fs(25), "block_gap": fs(32),
-        "bar_w": fs(9), "bar_gap": fs(20),
+        "footer": fs(29), "block_gap": fs(38),
+        "bar_w": fs(10), "bar_gap": fs(22),
         "img_max_h": fs(400), "img_radius": fs(20), "img_border": None,
         "text_color": (28, 31, 42), "sub_color": (120, 126, 140),
         "accent": theme["accent"],
